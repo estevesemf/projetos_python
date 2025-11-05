@@ -1,0 +1,441 @@
+# -*- coding: utf-8 -*-
+
+import re
+import numpy as np
+import pandas as pd
+import time
+
+def parse_funcao(texto, num_variaveis):
+    coeficientes = [0.0] * num_variaveis
+    termos = re.findall(r'([+-]?\s*\d*\.?\d*\s*x\d+)', texto.replace(' ', ''))
+    for termo in termos:
+        match = re.findall(r'([+-]?\d*\.?\d*)x(\d+)', termo)[0]
+        coef_str, var_str = match[0], match[1]
+
+        if coef_str in ['', '+']:
+            coef = 1.0
+        elif coef_str == '-':
+            coef = -1.0
+        else:
+            coef = float(coef_str)
+
+        idx = int(var_str) - 1
+        if idx >= len(coeficientes):
+            coeficientes.extend([0.0] * (idx + 1 - len(coeficientes)))
+        coeficientes[idx] = coef
+    return coeficientes
+
+def parse_restricao(texto, num_variaveis):
+    match_operador_lado_dir = re.findall(r'(<=|>=|=)\s*([+-]?\s*\d+\.?\d*)$', texto.replace(' ', ''))
+
+    if not match_operador_lado_dir:
+        raise ValueError("Formato de restrição inválido: não foi possível encontrar operador e lado direito.")
+
+    operador = match_operador_lado_dir[0][0]
+    lado_dir = float(match_operador_lado_dir[0][1])
+
+    coeficientes = [0.0] * num_variaveis
+    termos_texto = re.sub(r'(<=|>=|=)\s*[+-]?\s*\d+\.?\d*$', '', texto).replace(' ', '')
+
+    termos = re.findall(r'([+-]?\s*\d*\.?\d*\s*x\d+)', termos_texto)
+    for termo in termos:
+        match = re.findall(r'([+-]?\d*\.?\d*)x(\d+)', termo)[0]
+        coef_str, var_str = match[0], match[1]
+
+        if coef_str in ['', '+']:
+            coef = 1.0
+        elif coef_str == '-':
+            coef = -1.0
+        else:
+            coef = float(coef_str)
+
+        idx = int(var_str) - 1
+        if idx >= len(coeficientes):
+            coeficientes.extend([0.0] * (idx + 1 - len(coeficientes)))
+        coeficientes[idx] = coef
+    return coeficientes, operador, lado_dir
+
+
+
+def montar_tableau_(objetivo, restricoes, tipos, b, maximizacao):
+
+    n = len(objetivo)  # Número de variáveis de decisão
+    m = len(restricoes)  # Número de restrições
+
+    num_folgas = 0
+    num_artificiais = 0
+
+    # Contamos o número de variáveis de folga/excesso e artificiais
+    for tipo in tipos:
+        if tipo == '<=':
+            num_folgas += 1
+        elif tipo == '>=':
+            num_folgas += 1
+            num_artificiais += 1
+        elif tipo == '=':
+            num_artificiais += 1
+
+    total_cols = n + num_folgas + num_artificiais + 1  # +1 para o lado direito (b)
+    linhas = []
+
+    folga_idx = n
+    art_idx = n + num_folgas
+
+    # Monta as linhas das restrições
+    for i in range(m):
+        linha = [0.0] * (total_cols - 1)
+        for j in range(n):
+            linha[j] = restricoes[i][j] if j < len(restricoes[i]) else 0.0
+
+        if tipos[i] == '<=':
+            linha[folga_idx] = 1.0
+            folga_idx += 1
+        elif tipos[i] == '>=':
+            linha[folga_idx] = -1.0
+            folga_idx += 1
+            linha[art_idx] = 1.0
+            art_idx += 1
+        elif tipos[i] == '=':
+            linha[art_idx] = 1.0
+            art_idx += 1
+
+        linha.append(b[i])
+        linhas.append(linha)
+
+    obj_row_original = [-c for c in objetivo] if maximizacao else [c for c in objetivo]
+    obj_row_original.extend([0.0] * (num_folgas + num_artificiais))
+    obj_row_original.append(0.0)
+
+    obj_row_artificial = [0.0] * (n + num_folgas)
+    obj_row_artificial.extend([1.0] * num_artificiais)
+    obj_row_artificial.append(0.0) # RHS é 0
+
+    # Adiciona as duas linhas de função objetivo ao final do tableau
+    linhas.append(obj_row_original)
+    if num_artificiais > 0:
+      linhas.append(obj_row_artificial)
+
+    return np.array(linhas, dtype=float), num_folgas, num_artificiais
+
+"""# Checando quais variáveis estão na base
+
+"""
+
+def variaveis_na_base(tableau,n_aritficiais):
+  num_restricoes = tableau.shape[0] - (2 if n_aritficiais > 0 else 1)
+  vars_base = [0] * num_restricoes
+
+  num_restricoes = len(vars_base)
+  for col_idx in range(tableau.shape[1] - 1): # Itera nas colunas das variáveis
+      coluna = tableau[:num_restricoes, col_idx]
+
+      # Verifica se é uma coluna da matriz identidade
+      if np.sum(coluna) == 1.0 and np.count_nonzero(coluna) == 1:
+          linha_pivo = np.argmax(coluna)
+          # Armazena o índice da variável (ex: x1 -> 1, x2 -> 2)
+          vars_base[linha_pivo] = col_idx + 1
+  return vars_base
+
+"""# Algoritmo simplex com limite de 1000 iterações"""
+
+import numpy as np
+
+def simplex(tableau, folgas, n_art, maximizacao, iteracao=0, var_na_base=[], primeira_fase=False):
+    # Critério de parada (ótimo encontrado)
+    if np.min(tableau[-1, :-1]) >= 0 or iteracao >= 1000:
+      if primeira_fase:
+        return tableau, iteracao
+      else:
+        num_vars_decisao = tableau.shape[1] - folgas - 1
+        solucao = [0.0] * num_vars_decisao
+        print("Tableau Ótimo:")
+        print(tableau)
+        var_na_base = variaveis_na_base(tableau,n_art)
+        print(f"Variáveis na Base: {var_na_base}")
+        for var in var_na_base:
+          if var in range(num_vars_decisao+1):
+            solucao[var-1] = tableau[var_na_base.index(var)][-1]
+            #print(f"x{var} = {tableau[var_na_base.index(var),-1]}")
+        print(f"\nz={tuple(round(float(x),3) for x in solucao)}")
+        if maximizacao:
+          print(f"Z* = {round(tableau[-1,-1],3)}")
+        else:
+          print(f"Z* = {-round(tableau[-1,-1],3)}")
+
+        return tableau, iteracao
+
+    # Inicialização da base
+    if not var_na_base:
+      var_na_base = variaveis_na_base(tableau, n_art)
+
+
+    iteracao += 1
+    print(f"\nIteração {iteracao}:")
+
+    # Escolher a variável que entra na base (regra do maior negativo)
+    custos = tableau[-1, :-1]
+    min_val = np.min(custos)
+    index_coluna = np.where(np.isclose(custos, min_val))[0][0]
+    print(f"Entra na base: x{index_coluna+1}")
+
+    # Calcular a razão mínima (testando divisão por zero e negativos)
+    n_fun = -2 if n_art > 0 else -1
+    divisor = tableau[:n_fun, index_coluna]
+    rhs = tableau[:n_fun, -1]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        razoes = np.where(divisor > 0, rhs / divisor, np.inf)
+
+    if np.all(razoes == np.inf):
+        print("Problema ilimitado (não há solução ótima).")
+        return tableau, iteracao
+    print(f"Variáveis na Base: {var_na_base}")
+    index_linha = np.argmin(razoes)
+    print(f"Sai da base: x{var_na_base[index_linha]}")
+
+    # Atualizar base
+    var_na_base[index_linha] = int(index_coluna + 1)
+
+    # Operação de pivô
+    pivo = tableau[index_linha, index_coluna]
+    tableau[index_linha, :] = tableau[index_linha, :] / pivo
+
+    for i in range(tableau.shape[0]):
+        if i != index_linha:
+          fator = tableau[i, index_coluna]
+          tableau[i, :] -= fator * tableau[index_linha, :]
+
+    tableau = np.round(tableau, decimals=6)
+    print(tableau)
+    print("\n")
+
+    return simplex(tableau, folgas, n_art, maximizacao,iteracao, var_na_base, primeira_fase)
+
+"""# Fase 1 do métodos de duas fases"""
+
+def fase1(tableau, folgas, n_art, maximizacao):
+  if n_art == 0:
+    print("Nenhuma variável artificial. Pulando para a Fase 2.")
+    return simplex(tableau,folgas , n_art)
+  var_na_base = variaveis_na_base(tableau, n_art)
+
+  print("\n Fase 1 \n")
+  for var in var_na_base:
+    for linha in range(tableau.shape[0]):
+      pivot = np.where(tableau[:,var-1] == 1)[0][0]
+      if linha != pivot:
+        fator = tableau[linha,var-1]
+        if fator >= 0:
+          tableau[linha,:] -= fator * tableau[pivot,:]
+        else:
+          tableau[linha,:] -= fator * tableau[pivot,:]
+  print(" Tableau antes do simplex \n")
+  print(np.round(tableau, decimals=6))
+  tempo_inicio_fase1 = time.time()
+  tableau_i, i = simplex(np.round(tableau, decimals=6), folgas, n_art, maximizacao , primeira_fase=True)
+  tempo_final_fase1 = time.time()
+  print(f"\nTempo de execução do simplex na Fase 1: {tempo_final_fase1 - tempo_inicio_fase1:.6}s")
+
+  if abs(tableau_i[-1, -1]) > 1e-6:  # tolerância para zero
+    print("Problema inviável (Fase 1 tem valor ótimo positivo)")
+    return None
+
+  colunas_artificiais_indices = range(np.shape(tableau_i)[1] - 1  - n_art, np.shape(tableau_i)[1] - 1)
+  tableau_i = np.delete(tableau_i, colunas_artificiais_indices, axis=1)
+  tableau_i = tableau_i[:-1,:]
+
+  print("Fim da Fase 1")
+  print("\n Tableau inicial: \n")
+  print(np.round(tableau_i, decimals=6))
+  print("\n Fase 2: \n")
+  tempo_inicial_fase2 = time.time()
+  a, b = simplex(np.round(tableau_i, decimals=6), folgas, 0, maximizacao,iteracao=i)
+  tempo_final_fase2 = time.time()
+  print(f"\nTempo de execução do simplex na Fase 2: {tempo_final_fase2 - tempo_inicial_fase2:.6}s")
+  print(f"\nTempo total de execução do simplex: {tempo_final_fase2 - tempo_inicio_fase1:.6}s")
+
+"""Rodando o programa"""
+
+def main():
+    maximizacao = input("Problema é de Maximo? (s/n): ").lower() == 's'
+    func_texto = input("Função Objetiva: ")
+    restricoes_list = []
+    tipos_list = []
+    b_list = []
+
+    all_vars_in_text_func = re.findall(r'x(\d+)', func_texto)
+    max_var_num = 0
+    if all_vars_in_text_func:
+        max_var_num = max([int(x) for x in all_vars_in_text_func])
+
+    numero_de_restricoes = 0
+    while True:
+        restricao = input(f"Restrição {numero_de_restricoes+1} (ou 0 para parar): ")
+        if restricao == '0':
+            break
+
+        vars_in_rest = re.findall(r'x(\d+)', restricao)
+        if vars_in_rest:
+            max_var_num = max(max_var_num, max([int(x) for x in vars_in_rest]))
+
+        coef, tipo, lado = parse_restricao(restricao, max_var_num)
+        restricoes_list.append(coef)
+        tipos_list.append(tipo)
+        b_list.append(lado)
+        numero_de_restricoes += 1
+
+    positivas = input("Variáveis positivas? (s/n): ").lower() == 's'
+    tempo_inicial_parse = time.time() # marca o tempo de incio do parse
+    objetivo = parse_funcao(func_texto, max_var_num)
+    if len(objetivo) < max_var_num:
+        objetivo.extend([0.0] * (max_var_num - len(objetivo)))
+
+    # Ajustar tamanho das restrições
+    for i in range(len(restricoes_list)):
+        if len(restricoes_list[i]) < max_var_num:
+            restricoes_list[i].extend([0.0] * (max_var_num - len(restricoes_list[i])))
+
+    tableau, folgas, artificias = montar_tableau_(objetivo, restricoes_list, tipos_list, b_list, maximizacao)
+    tempo_final_parse = time.time() # marca o tempo de fim do parse
+    tempo_parse = tempo_final_parse - tempo_inicial_parse
+    print("\nTableau Simplex Inicial:")
+    print(tableau)
+    return tableau, numero_de_restricoes, folgas, artificias, maximizacao, tempo_inicial_parse, tempo_parse
+
+def metodo_duas_fases():
+    tableau_inicial, num_restricoes, folgas, artificiais, maximizacao, tempo_inicial_parse, tempo_parse = main()
+    print(f"Número de restrições: {num_restricoes}")
+    print(f"Número de folgas: {folgas}")
+    print(f"Número de artificiais: {artificiais}")
+    tempo_inicial_duas_fases = time.time() # marca o tempo de incio do simplex
+    fase1(tableau_inicial, folgas, artificiais, maximizacao)
+    tempo_final_duas_fases = time.time() # marca o tempo de fim do simplex
+    print('==========Tempo de execução==========')
+    print(f'Tempo do parse: {tempo_parse:.6} segundos')
+    print(f'Tempo do método de duas fases: {tempo_final_duas_fases - tempo_inicial_duas_fases:.6} segundos')
+    print(f'Tempo total: {tempo_final_duas_fases - tempo_inicial_parse:.6} segundos')
+
+"""if __name__ == "__main__":
+    tableau_inicial, num_restricoes, folgas, artificiais = main()
+    print(f"Número de restrições: {num_restricoes}")
+    print(f"Número de folgas: {folgas}")
+    print(f"Número de artificiais: {artificiais}")
+    fase1(tableau_inicial, artificiais)"""
+
+"""# Áreas de Teste
+
+# Casos de testes utilizados
+
+## Exemplo 1
+
+Minimize z = –3x₁ – 5x₂ \\
+Sujeito a: x₁ ≤ 4 \\
+ x₂ ≤ 6 \\
+3x₁ + 2x₂ ≥ 18 \\
+x₁, x₂ ≥ 0
+"""
+
+"""Problema é de Maximo? (s/n): n
+Problema é de Maximo? (s/n): n
+Função Objetiva: -3x1-5x2
+Restrição 1 (ou 0 para parar): x1<=4
+Restrição 2 (ou 0 para parar): x2<=6
+Restrição 3 (ou 0 para parar): 3x1+2x2>=18"""
+metodo_duas_fases()
+
+"""## Exemplo 2
+
+Problema de Planejamento de Sessões de Radioterapia (Pág 43) \\
+Minimizar Z = 0.4x1 + 0.5x2 \\
+sujeito a \\
+0.3x1 + 0.1x2 <= 2.7 \\
+0.5x1 + 0.5x2 = 6 \\
+0.6x1 + 0.4x2 >= 6 \\
+X1 e x2 >= 0
+
+
+(INTRODUÇAO A PESQUISA - OPERACIONAL
+8a Edição
+
+FREDERICK S. HILLIER
+Stanford University
+
+GERALD J. LIEBERMAN
+Ex-Professor Titular da Stanford University)
+"""
+
+"""
+n
+0.4x1+0.5x2
+
+0.3x1+0.1x2<=2.7
+0.5x1+0.5x2=6
+0.6x1+0.4x2>=6
+
+"""
+metodo_duas_fases()
+
+"""# Exemplo 3
+
+Planejamento Regional ( Pag 45 )
+
+maximize z = 1000x1 + 1000x2 + 1000x3 + 750x4 +
+             750x5 + 750x6 + 250x7 + 250x8 +250x9
+
+
+Sujeito a: x1 + x4 + x7 <= 400 \\
+x2 + x5 + x8 <= 600 \\
+x3 + x6 + x9 <= 300 \\
+
+3x1 + 2x4 + x7 <= 600 \\
+3x2 + 2x5 + x8 <= 800 \\
+3x3 + 2x6 + x9 <= 375
+
+x1 + x2 + x3 <= 600 \\
+x4 + x5 + x6 <= 500 \\
+x7 + x8 + x9 <= 375
+
+3x1 + 3x4 + 3x7 - 2x2 - 2x5 - 2x8 = 0 \\
+x2 + x5 + x8 - 2x3 -2x6 - 2x9 = 0 \\
+4x3 + 4x6 + 4x9 - 3x1 - 3x4 - 3x7 = 0 \\
+
+xi >= 0, para i = 1,2,...,9 \\
+
+x1, x2, x3: Acres de beterraba nas comunas 1,2 e 3, respectivamente \\
+x4, x5, x6: Acres de algodão nas comunas 1,2 e 3, respectivamente \\
+x7, x8, x9: Acres de sorgo nas comunas 1,2 e 3, respectivamente \\
+
+
+
+(INTRODUÇAO A PESQUISA - OPERACIONAL
+8a Edição
+
+FREDERICK S. HILLIER
+Stanford University
+
+GERALD J. LIEBERMAN
+Ex-Professor Titular da Stanford University)
+"""
+
+"""
+maximize z =
+1000x1 + 1000x2 + 1000x3 + 750x4 + 750x5 + 750x6 + 250x7 + 250x8 +250x9
+
+Sujeito a:
+x1 + x4 + x7 <= 400
+x2 + x5 + x8 <= 600
+x3 + x6 + x9 <= 300
+
+3x1 + 2x4 + x7 <= 600
+3x2 + 2x5 + x8 <= 800
+3x3 + 2x6 + x9 <= 375
+
+x1 + x2 + x3 <= 600
+x4 + x5 + x6 <= 500
+x7 + x8 + x9 <= 375
+
+3x1 + 3x4 + 3x7 - 2x2 - 2x5 - 2x8 = 0
+x2 + x5 + x8 - 2x3 -2x6 - 2x9 = 0
+4x3 + 4x6 + 4x9 - 3x1 - 3x4 - 3x7 = 0
+"""
+
+metodo_duas_fases()
